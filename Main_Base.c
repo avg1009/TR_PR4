@@ -24,32 +24,11 @@
  *
  */
 
-/******************************************************************************
- * NOTE 1: The FreeRTOS demo threads will not be running continuously, so
- * do not expect to get real time behaviour from the FreeRTOS Linux port, or
- * this demo application.  Also, the timing information in the FreeRTOS+Trace
- * logs have no meaningful units.  See the documentation page for the Linux
- * port for further information:
- * https://freertos.org/FreeRTOS-simulator-for-Linux.html
- *
- *
- * NOTE 2:  This file only contains the source code that is specific to the
- * basic demo.  Generic functions, such FreeRTOS hook functions, are defined
- * in main.c.
- ******************************************************************************
- *
- * main_base() creates two tasks.  It then starts the scheduler.
- *
- *
- * NOTE:  Console input and output relies on Linux system calls, which can
- * interfere with the execution of the FreeRTOS Linux port. This demo only
- * uses Linux system call occasionally. Heavier use of Linux system calls
- * may crash the port.
- */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <pthread.h>
-
+#include <math.h>
 /* Kernel includes. */
 #include "FreeRTOS.h"
 #include "task.h"
@@ -59,257 +38,248 @@
 /* Local includes. */
 #include "console.h"
 
+#include "variable_global.h"
+#include <time.h>
+
+
 /* Priorities at which the tasks are created. */
-#define TASK1_PRIORITY    ( tskIDLE_PRIORITY + 1 )
-#define TASK2_PRIORITY       ( tskIDLE_PRIORITY + 2 )
-#define TASK3_PRIORITY       ( tskIDLE_PRIORITY + 3 )
-#define TASK4_PRIORITY       ( tskIDLE_PRIORITY + 4 )
+#define T1_PRIORITY    ( tskIDLE_PRIORITY + 1 )
+#define T2_PRIORITY    ( tskIDLE_PRIORITY + 1 )
+#define T3_PRIORITY    ( tskIDLE_PRIORITY + 1 )
+#define T4_PRIORITY    ( tskIDLE_PRIORITY + 1 )
 
 /* The rate at which data is sent to the queue.  The times are converted from
  * milliseconds to ticks using the pdMS_TO_TICKS() macro. */
-#define FREQUENCY_MS_TASK1         pdMS_TO_TICKS( 2000UL )
-#define FREQUENCY_MS_TASK2         pdMS_TO_TICKS( 10000UL )
-
-
-/* Constantes */
-
-#define Max_Num 20 
-#define Min 0
-#define Max 100
-#define Tam_FileName 6
-
+#define FREQUENCY_MS_TASK1         pdMS_TO_TICKS( 3000UL )
+#define FREQUENCY_MS_TASK2         pdMS_TO_TICKS( 100UL )
+#define SLEEP_TASK1                pdMS_TO_TICKS( 10000UL )
+#define SLEEP_TASK2                pdMS_TO_TICKS( 1000UL )
 
 /*-----------------------------------------------------------*/
+#define N_T3 5 // Instancias de la T3
+#define LEN_ARCHIVO 6 // Tamaño del nombre del archivo
 
-/*
- * The tasks as described in the comments at the top of this file.
- */
-static void prvTask1( void * pvParameters );
-static void prvTask2( void * pvParameters );
-static void prvTask3( void * pvParameters );
-static void prvTask4( void * pvParameters );
 
-/*-----------------------------------------------------------*/
-// Semáforo para notificar que T1 ha terminado
-SemaphoreHandle_t semaforoT1Terminado;
+/*-------------------------- funciones ---------------------------*/
+float calcularPromedio(const char* nameFile);
+float masRepetido(float arr[], int n, int * maxrep);
 
-// Cola para comunicar el nombre del fichero generado por T1 a T2
-QueueHandle_t colaNombreFichero;
+/*-------------------------- tareas ------------------------------*/
 
-// Cola para comunicar los resultados de T3.x a T2
-QueueHandle_t colaResultadosT3;
+// 20 numeros enteros 0-100 en un fichero con nombre aleatorio T=5s
+static void tarea1( void * pvParameters );
+// Activa 5 tareas T3.x comunica el nom de archivo 
+static void tarea2( void * pvParameters );
+// Se generan 5 de tipo 3 reciben el nom de fichero y calculan la media
+// Falla el 90%
+static void tarea3( void * pvParameters );
+// Solo consume 1 sec
+static void tarea4( void * pvParameters );
 
-/*-----------------------------------------------------------*/
+
+/*-------------------------- Colas ------------------------------*/
+
+QueueHandle_t colaT32; // Cola para que se comuniquen T3 y T2 las medias
+QueueHandle_t colaT12; // Cola para que se comuniquen T1 y T2 el nombre del archivo
+
+//SemaphoreHandle_t mutex;
+
+/*--------------------- Semaforos -------------------------------*/
+
+SemaphoreHandle_t semT12; // T1 y T2
+SemaphoreHandle_t semT24; // T2 y T4
+
+/*--------------------- Otros ------------------------------------*/
+
+int global1 = 0;
+int global2 = 0;
 
 /*** SEE THE COMMENTS AT THE TOP OF THIS FILE ***/
 void main_base( void )
 {
+    // Cola
+    colaT32 = xQueueCreate(N_T3, sizeof(float));
+    colaT12 = xQueueCreate(N_T3, sizeof(char)*(LEN_ARCHIVO+1));
+
+    // Semaforos (Cambiar por mutex?)
+    semT12 = xSemaphoreCreateBinary();
+    semT24 = xSemaphoreCreateBinary();
     
-    // Crear la cola para el nombre del fichero
-    colaNombreFichero = xQueueCreate(1, sizeof(char[7]));
+    // T1, T2, T4 (T3 se lanza distinto)
+    xTaskCreate(tarea1, "T1", configMINIMAL_STACK_SIZE, NULL, T1_PRIORITY, NULL);
+    xTaskCreate(tarea2, "T2", configMINIMAL_STACK_SIZE, NULL, T2_PRIORITY, NULL);
+    xTaskCreate(tarea4, "T4", configMINIMAL_STACK_SIZE, NULL, T4_PRIORITY, NULL);
 
-    // Crear la cola para los resultados de T3.x
-    colaResultadosT3 = xQueueCreate(5, sizeof(ResultadoT3));
-
-    // Crear el semáforo para sincronizar T1 y T2
-    semaforoT1Terminado = xSemaphoreCreateBinary();
-
-    /* Start the two tasks as described in the comments at the top of this * file. */
-    xTaskCreate( prvTask1,                        /* The function that implements the task. */
-                 "Task1",                            /* The text name assigned to the task - for debug only as it is not used by the kernel. */
-                 configMINIMAL_STACK_SIZE,        /* The size of the stack to allocate to the task. */
-                 NULL,                            /* The parameter passed to the task - not used in this simple case. */
-                 TASK1_PRIORITY,                  /* The priority assigned to the task. */
-                 NULL );                          /* The task handle is not required, so NULL is passed. */
-
-    xTaskCreate( prvTask2, "Task2", configMINIMAL_STACK_SIZE, NULL, TASK2_PRIORITY, NULL );
-    xTaskCreate( prvTask3_1, "Task3.1", configMINIMAL_STACK_SIZE, NULL, TASK3_PRIORITY, NULL );
-    xTaskCreate( prvTask3_2, "Task3.2", configMINIMAL_STACK_SIZE, NULL, TASK3_PRIORITY, NULL );
-    xTaskCreate( prvTask3_3, "Task3.3", configMINIMAL_STACK_SIZE, NULL, TASK3_PRIORITY, NULL );
-    xTaskCreate( prvTask3_4, "Task3.4", configMINIMAL_STACK_SIZE, NULL, TASK3_PRIORITY, NULL );
-    xTaskCreate( prvTask3_5, "Task3.5", configMINIMAL_STACK_SIZE, NULL, TASK3_PRIORITY, NULL );
-    xTaskCreate( prvTask4, "Task4", configMINIMAL_STACK_SIZE, NULL, TASK4_PRIORITY, NULL );
-
-
-    /* Start the tasks and get the scheduler running. */
+    // Lanzamiento del scheduler
     vTaskStartScheduler();
 
-    /* If all is well, the scheduler will now be running, and the following
-     * line will never be reached.  If the following line does execute, then
-     * there was insufficient FreeRTOS heap memory available for the idle and/or
-     * timer tasks to be created.  See the memory management section on the
-     * FreeRTOS web site for more details. */
-    for( ; ; )
-    {
-    }
+    for( ; ; ){}
 }
 /*-----------------------------------------------------------*/
 
-static void prvTask1( void * pvParameters )
-{
-    /* Prevent the compiler warning about the unused parameter. */
+/*
+ * TAREA 1 - Productor:
+ * - Nueros aleatorios del 0 al 100
+ * - Los mete en un fichero
+ * - El nombre del fichero es aleatorio
+ * - El nombre tiene un tamaño maximo LEN_ARCHIVO
+ * -------
+ * T = 5s
+ * T1 --sem--> T2
+ * T1:nombre --cola--> T2/
+ */
+static void tarea1(void * pvParameters){
     ( void ) pvParameters;
+    for( ; ; ){
+        console_print("[T1] Tarea1\n");
+        // Generar un nombre de fichero aleatorio +1 null terminator
+        char filename[LEN_ARCHIVO + 1];
 
-    for( ; ; )
-    {
-
-        /* Send to the queue - causing the queue receive task to unblock and
-         * write to the console.  0 is used as the block time so the send operation
-         * will not block - it shouldn't need to block as the queue should always
-         * have at least one space at this point in the code. */
-        char nameFile[Tam_FileName +1]; 
-        RandomName(nameFile, Tam_FileName);
-        File *file = fopen (nameFile , "w");
-        if ( file != NULL){
-
-            for ( int i = 0 ; i > Max_Num ; i++){
-                int numero = rand() % (Max - Min +1 )  + Min; 
-
-                fprintf(file , "%d\n",numero )
-            }
-        fclose();
+        for (int i = 0; i < LEN_ARCHIVO; i++) {
+            filename[i] = 'a' + rand() % 26;
         }
+        
+        filename[LEN_ARCHIVO] = '\0';
 
-        // Enviar nombre del fichero a T2 
-        xQueueSend(colaNombreFichero, &nameFile, portMAX_DELAY);
-        //Notifica a T2 qye el Semaforo ha terminado
-        xSemaphoreGive(semaforoT1Terminado);
+        FILE* file = fopen(filename, "w");
 
-        /* Place this task in the blocked state until it is time to run again.
-        *  The block time is specified in ticks, pdMS_TO_TICKS() was used to
-        *  convert a time specified in milliseconds into a time specified in ticks.
-        *  While in the Blocked state this task will not consume any CPU time. */
-        vTaskDelay( FREQUENCY_MS_TASK1 );
+        // Aleatorios
+        for (int i = 0; i < 20; i++) {
+            int num = rand() % 101; // Entre 0 y 100
+            fprintf(file, "%d\n", num);
+        }
+        fclose(file);
+
+        console_print("[T1] Archivo %s \n",filename);
+
+        // Notificar a T2 el nombre del fichero generado
+        xQueueSend(colaT12, &filename, portMAX_DELAY);
+
+        // Abrimos paso a T2
+        xSemaphoreGive(semT12);
+
+        // TODO pasar a constante
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
-/*-----------------------------------------------------------*/
 
-
-static void prvTask2( void * pvParameters )
-{
-    /* Prevent the compiler warning about the unused parameter. */
+/*
+ * TAREA 2 - Consumidor:
+ * - Espera a T1
+ * - Activa las tareas T3
+ * - Pasa el nombre a T3.x
+ * - Espera a que acaben todas
+ * - Mayoria absoluta segun respuestas
+ * - Borra el fichero
+ * - Imprime resultados
+ * 
+ */
+static void tarea2(void * pvParameters){
     ( void ) pvParameters;
+    for( ; ; ){
+        char filename[LEN_ARCHIVO + 1]; // Nombre del archivo
+        float medias[N_T3];             // medias obtenidas en los T3
+        int numRespuestas = 0;          // respuestas obtenidas
+        float sumaResultados = 0;       // dep
+        float resultadoT3;              //intermedia
 
-    int numRespuestas = 0;
-    float sumaResultados = 0.0;
+        // Esperar la notificación de T1
+        xSemaphoreTake(semT12, portMAX_DELAY);
 
-    for( ; ; )
-    {
+        console_print("[T2] Tarea2\n");
 
-        xSemaphoreTake(semaforoT1Terminado, portMAX_DELAY);
-        char nameFile[Tam_FileName +1]; 
-        xQueueReceive(colaNombreFichero, &nameFile, portMAX_DELAY);
+        // Notificar a T2 el nombre del fichero generado
+        xQueueReceive(colaT12, &filename, portMAX_DELAY);
 
-         // Activar las tareas T3.1-T3.5 y pasarles el nombre del fichero
-        for (int i = 1; i <= 5; i++) {
-            char nombreTarea[5];
+        // Activar las tareas T3.1-T3.5 y pasarles el nombre del fichero
+        for (int i = 1; i <= N_T3; i++) {
+            char nombreTarea[10];
             sprintf(nombreTarea, "T3.%d", i);
-            xTaskCreate(tarea_T3, nombreTarea, configMINIMAL_STACK_SIZE, &nameFile, 3, NULL);
+            xTaskCreate(tarea3, nombreTarea, configMINIMAL_STACK_SIZE, (char *) filename, T3_PRIORITY, NULL);
+            
         }
 
         // Esperar las respuestas de las tareas T3.1-T3.5
-        float resultadoT3;
-        for (int i = 0; i < 5; i++) {
-        xQueueReceive(colaResultadosT3, &resultadoT3, portMAX_DELAY);
-        numRespuestas++;
-        sumaResultados += resultadoT3;
+        for (int i = 0; i < N_T3; i++) {
+            xQueueReceive(colaT32, &medias[i], portMAX_DELAY);
+            // Calculo
+            console_print("[T2] Obtiene %.3f\n",medias[i]);
         }
 
-        // Calcular el valor promedio
-        float promedio = sumaResultados / numRespuestas;
+        // TODO: Conteo de votos
+        int maxrep;
+        resultadoT3 = masRepetido(medias, N_T3, &maxrep);
 
-        // Verificar si hay consenso o no
-        if (numRespuestas >= 3) {
-        // Consenso alcanzado
-        printf("Consenso alcanzado entre %d de 5 tareas. Valor promedio: %.2f\n", numRespuestas, promedio);
+        // Si tiene mas que el 50% + 1 de los votos
+        if (maxrep > ceil(N_T3/2)){
+            console_print("[T2] %d procesos han votado por %.3f\n",maxrep,resultadoT3);
         } else {
-        // Consenso no alcanzado
-        printf("Consenso no alcanzado\n");
+            console_print("[T2] No ha habido consenso\n");
         }
 
-        // Borrar el fichero
-    borrarFichero(nombreFichero);
-
-    // Reiniciar variables para la siguiente iteración
-    numRespuestas = 0;
-    sumaResultados = 0.0;
-
-        vTaskDelay( FREQUENCY_MS_TASK2 );
+        
+        // Borrar archivo
+        if (remove(filename) == 0) {
+            console_print("Fichero \"%s\" borrado correctamente.\n", filename);
+        } else {
+            console_print("Error al borrar el fichero \"%s\".\n", filename);
+        }
     }
 }
-/*-----------------------------------------------------------*/
 
-static void prvTask3( void * pvParameters )
-{
-    /* Prevent the compiler warning about the unused parameter. */
-    ( void ) pvParameters;
+/*
+ * TAREA 3:
+ * - Calcula valor medio del fichero (solo lectura)
+ * - 90% de prob de mandar el correcto
+ * - Introduce los datos en la cosa
+ * - Se autodestruye
+ */
+static void tarea3(void * pvParameters){
+
     // Variables para el nombre del fichero y el resultado
-    char nameFile[Tam_FileName +1];
+    char *filename = (char *) pvParameters;
     float resultado;
-    for( ; ; )
-    {
-    // Recibir el nombre del fichero de T2 mediante la cola
-    xQueueReceive(colaNombreFichero, &nameFile, portMAX_DELAY);
 
-    // Calcular el resultado 
-    if (rand() % 10 < 9) {
-      // Resultado válido (valor promedio)
-      resultado = calcularPromedio(nombreFichero); 
+    // Obtener el nombre de la tarea
+    TaskStatus_t xTaskDetails;
+    vTaskGetInfo( NULL,
+                  &xTaskDetails,
+                  pdTRUE,
+                  eInvalid );
+
+    console_print("[%s] %s lanzado \n",xTaskDetails.pcTaskName, xTaskDetails.pcTaskName);
+    
+    if (rand() % 100 < 10) { // < 10 para poder tocar la probabilidad
+        // Resultado válido (valor promedio)
+        resultado = calcularPromedio(filename); 
     } else {
-      // Resultado aleatorio
-      resultado = calcularValorAleatorio(); 
+        // Resultado aleatorio
+        resultado = (float) rand() / RAND_MAX;
     }
+
+    console_print("[%s] obtiene %.3f \n",xTaskDetails.pcTaskName, resultado);
 
     // Enviar el resultado a T2 mediante la cola
-    ResultadoT3 resultadoT3;
-    resultadoT3.resultado = resultado;
-    resultadoT3.tiempoEnvio = xTaskGetTickCount();
-    xQueueSend(colaResultadosT3, &resultadoT3, portMAX_DELAY);
-    }
-}
+    xQueueSend(colaT32, &resultado, portMAX_DELAY);
 
-/*-----------------------------------------------------------*/
-
-/*-----------------------------------------------------------*/
-
-static void prvTask4( void * pvParameters )
-{
-    /* Prevent the compiler warning about the unused parameter. */
-    ( void ) pvParameters;
-
-    TickType_t xLastWakeTime;
-
-    // Inicializar la variable xLastWakeTime
-    xLastWakeTime = xTaskGetTickCount(); //XTaskGetTickCount recoge el tiempo del sistema y se actualiza en cada iteracion
-
-    for( ; ; )
-    {
-         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000)); //Especifica un periodo de espera de 1 segundo
-    }
-}
-
-
-
-void RandomName(char nameFile*, int tam){
-    const char character[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIKLMNOPQRSTUVWXYZ" ;
-    int totalChar = sizeof(character) -1 ; 
+    // Responsabilidad de destruccion
+    vTaskDelete(NULL);
     
-
-    for ( int  i ; i < tam ; i++){
-
-        nameFile = character[rand()% totalChar]
-    }
-
-    nameFile[tam] = '\0'
 }
 
+/*
+ * TAREA 4:
+ * - Solo espera
+ */
+static void tarea4(void * pvParameters) {
+    ( void ) pvParameters;
+    for( ; ; ) {
 
-// Función para borrar el fichero
-void borrarFichero(const char* nombreFichero) {
-    if (remove(nombreFichero) == 0) {
-        printf("Fichero \"%s\" borrado correctamente.\n", nombreFichero);
-    } else {
-        printf("Error al borrar el fichero \"%s\".\n", nombreFichero);
+        xSemaphoreTake(semT24, portMAX_DELAY); // Espera a T2
+
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Consume 1 sec
+
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Espera 2 sec
     }
 }
 
@@ -332,20 +302,31 @@ float calcularPromedio(const char* nameFile) {
 
     fclose(fichero);
 
-    if (totalNumeros > 0) {
-        float promedio = (float)suma / totalNumeros;
-        return promedio;
-    } else {
-        printf("El fichero \"%s\" está vacío.\n", nameFile);
-        return 0.0;
-    }
+    float promedio = (float)suma / totalNumeros;
+    return promedio;
+
 }
 
-// Función para generar un valor aleatorio en un rango determinado
-float calcularValorAleatorio() {
-    float valorMinimo = 0.0;
-    float valorMaximo = 100.0;
+// Función para encontrar el valor más repetido en un arreglo de float
+float masRepetido(float arr[], int n, int * maxrep) {
+    float valorMasRepetido = arr[0];
+    int maxRepeticiones, repeticiones = 0;
 
-    float valorAleatorio = valorMinimo + ((float)rand() / RAND_MAX) * (valorMaximo - valorMinimo);
-    return valorAleatorio;
+    for (int i = 0; i < n; i++) {
+        repeticiones=1;
+
+        for (int j = i + 1; j < n; j++) {
+            if (arr[i] == arr[j])
+                repeticiones++;
+        }
+
+        if (repeticiones > maxRepeticiones) {
+            maxRepeticiones = repeticiones;
+            valorMasRepetido = arr[i];
+        }
+    }
+
+    *maxrep = maxRepeticiones;
+
+    return valorMasRepetido;
 }
