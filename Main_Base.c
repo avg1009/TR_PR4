@@ -50,15 +50,31 @@
 
 /* The rate at which data is sent to the queue.  The times are converted from
  * milliseconds to ticks using the pdMS_TO_TICKS() macro. */
-#define FREQUENCY_MS_TASK1         pdMS_TO_TICKS( 3000UL )
-#define FREQUENCY_MS_TASK2         pdMS_TO_TICKS( 100UL )
+#define FREQUENCY_MS_TASK1         pdMS_TO_TICKS( 100UL )
+#define FREQUENCY_MS_TASK2         pdMS_TO_TICKS( 3000UL )
 #define SLEEP_TASK1                pdMS_TO_TICKS( 10000UL )
 #define SLEEP_TASK2                pdMS_TO_TICKS( 1000UL )
+
+
+
 
 /*-----------------------------------------------------------*/
 #define N_T3 5 // Instancias de la T3
 #define LEN_ARCHIVO 6 // Tamaño del nombre del archivo
 
+/*-----------------------------------------------------------*/
+const TickType_t taskPeriods[4] = {1000,3000,500,2000};
+const TickType_t taskWorstCaseTime[4] = {100,200,50,1000};
+
+struct TaskInfo {
+TickType_t periodo;
+TickType_t deadline;
+TickType_t holgura;
+
+}
+
+
+struct TaskInfo taskInfo[4];
 
 /*-------------------------- funciones ---------------------------*/
 float calcularPromedio(const char* nameFile);
@@ -106,10 +122,17 @@ void main_base( void )
     semT24 = xSemaphoreCreateBinary();
     
     // T1, T2, T4 (T3 se lanza distinto)
-    xTaskCreate(tarea1, "T1", configMINIMAL_STACK_SIZE, NULL, T1_PRIORITY, NULL);
-    xTaskCreate(tarea2, "T2", configMINIMAL_STACK_SIZE, NULL, T2_PRIORITY, NULL);
-    xTaskCreate(tarea4, "T4", configMINIMAL_STACK_SIZE, NULL, T4_PRIORITY, NULL);
+    xTaskCreate(tarea1, "T1", configMINIMAL_STACK_SIZE, NULL, T1_PRIORITY, &taskHandles[0]);
+    xTaskCreate(tarea2, "T2", configMINIMAL_STACK_SIZE, NULL, T2_PRIORITY, &taskHandles[1]);
+    xTaskCreate(tarea4, "T4", configMINIMAL_STACK_SIZE, NULL, T4_PRIORITY, &taskHandles[3]);
 
+    for (int i = 0; i < 4; i++){
+
+        taskInfo[i].periodo = pdMS_TO_TICKS(taskPeriods[i]);
+        taskInfo[i].deadline = taskInfo[i].periodo;
+        taskInfo[i].holgura = 0;
+
+    }
     // Lanzamiento del scheduler
     vTaskStartScheduler();
 
@@ -130,7 +153,9 @@ void main_base( void )
  */
 static void tarea1(void * pvParameters){
     ( void ) pvParameters;
-    for( ; ; ){
+    TickType_t startTime;
+    for( ; ; ) {
+        startTime = xTaskGetTickCount();
         console_print("[T1] Tarea1\n");
         // Generar un nombre de fichero aleatorio +1 null terminator
         char filename[LEN_ARCHIVO + 1];
@@ -152,14 +177,18 @@ static void tarea1(void * pvParameters){
 
         console_print("[T1] Archivo %s \n",filename);
 
+        calcularHolgura();
+        asignarPrioridad();
+
         // Notificar a T2 el nombre del fichero generado
         xQueueSend(colaT12, &filename, portMAX_DELAY);
 
         // Abrimos paso a T2
         xSemaphoreGive(semT12);
 
+
         // TODO pasar a constante
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelayUntil(&startTime,pdMS_TO_TICKS(taskInfo[0].periodo));
     }
 }
 
@@ -176,7 +205,9 @@ static void tarea1(void * pvParameters){
  */
 static void tarea2(void * pvParameters){
     ( void ) pvParameters;
-    for( ; ; ){
+    TickType_t startTime;
+    for( ; ; ) {
+        startTime = xTaskGetTickCount();
         char filename[LEN_ARCHIVO + 1]; // Nombre del archivo
         float medias[N_T3];             // medias obtenidas en los T3
         int numRespuestas = 0;          // respuestas obtenidas
@@ -187,7 +218,8 @@ static void tarea2(void * pvParameters){
         xSemaphoreTake(semT12, portMAX_DELAY);
 
         console_print("[T2] Tarea2\n");
-
+        calcularHolgura();
+        asignarPrioridad();
         // Notificar a T2 el nombre del fichero generado
         xQueueReceive(colaT12, &filename, portMAX_DELAY);
 
@@ -195,7 +227,7 @@ static void tarea2(void * pvParameters){
         for (int i = 1; i <= N_T3; i++) {
             char nombreTarea[10];
             sprintf(nombreTarea, "T3.%d", i);
-            xTaskCreate(tarea3, nombreTarea, configMINIMAL_STACK_SIZE, (char *) filename, T3_PRIORITY, NULL);
+            xTaskCreate(tarea3, nombreTarea, configMINIMAL_STACK_SIZE, (char *) filename, T3_PRIORITY,  &taskHandles[2]);
             
         }
 
@@ -217,13 +249,15 @@ static void tarea2(void * pvParameters){
             console_print("[T2] No ha habido consenso\n");
         }
 
-        
+
         // Borrar archivo
         if (remove(filename) == 0) {
             console_print("Fichero \"%s\" borrado correctamente.\n", filename);
         } else {
             console_print("Error al borrar el fichero \"%s\".\n", filename);
         }
+        vTaskDelayUntil(&startTime,pdMS_TO_TICKS(taskInfo[1].periodo));
+
     }
 }
 
@@ -235,6 +269,12 @@ static void tarea2(void * pvParameters){
  * - Se autodestruye
  */
 static void tarea3(void * pvParameters){
+
+    TickType_t startTime;
+    for( ; ; ) {
+        startTime = xTaskGetTickCount();
+
+
 
     // Variables para el nombre del fichero y el resultado
     char *filename = (char *) pvParameters;
@@ -259,11 +299,20 @@ static void tarea3(void * pvParameters){
 
     console_print("[%s] obtiene %.3f \n",xTaskDetails.pcTaskName, resultado);
 
+
+    // TO DO Calcular las holguras
+    calcularHolgura();
+    asignarPrioridad();
+
     // Enviar el resultado a T2 mediante la cola
     xQueueSend(colaT32, &resultado, portMAX_DELAY);
 
     // Responsabilidad de destruccion
     vTaskDelete(NULL);
+
+    //Esperar hasta el proximo periodo relativo
+    vTaskDelayUntil(&startTime,pdMS_TO_TICKS(taskInfo[2].periodo));
+    }
     
 }
 
@@ -273,13 +322,21 @@ static void tarea3(void * pvParameters){
  */
 static void tarea4(void * pvParameters) {
     ( void ) pvParameters;
+    TickType_t startTime;
     for( ; ; ) {
+
+        startTime = xTaskGetTickCount();
 
         xSemaphoreTake(semT24, portMAX_DELAY); // Espera a T2
 
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Consume 1 sec
+        calcularHolgura();
+        asignarPrioridad();
 
-        vTaskDelay(pdMS_TO_TICKS(2000)); // Espera 2 sec
+        //vTaskDelay(pdMS_TO_TICKS(1000)); // Consume 1 sec
+
+        //vTaskDelay(pdMS_TO_TICKS(2000)); // Espera 2 sec
+
+        vTaskDelayUntil(&startTime,pdMS_TO_TICKS(taskInfo[3].periodo));
     }
 }
 
@@ -329,4 +386,28 @@ float masRepetido(float arr[], int n, int * maxrep) {
     *maxrep = maxRepeticiones;
 
     return valorMasRepetido;
+}
+
+//Función para calcular las hlguras y asignar propiedades dinámicas 
+
+void calcularHolgura(void){
+    TickType_t tiempoActual = xTaskGetTickCoun();
+
+    for(int i = 0; i < 4 ; i++){
+
+        taskInfo[i].holgura = taskInfo[i].deadline - tiempoActual;
+    }
+
+
+}
+
+void asignarPrioridad(void){
+    TickType_t tiempoActual = xTaskGetTickCoun();
+
+    for(int i = 0; i < 4 ; i++){
+        
+        vTaskPrioritySet(taskHandles[i], taskInfo[i].holgura);
+
+        taskInfo[i].deadline = tiempoActual + taskInfo[i].periodo ; 
+    }
 }
